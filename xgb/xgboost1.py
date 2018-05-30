@@ -69,6 +69,7 @@ def statYearMonthLenSum(df, index, values, statLen=None, skipLen=1):
             tempDf.loc[:,pd.IndexSlice['addup_len',dt]] = tempDf['len'].iloc[:,i:i+statLen].sum(axis=1)
             tempDf.loc[:,pd.IndexSlice['addup_sum',dt]] = tempDf['sum'].iloc[:,i:i+statLen].sum(axis=1)
     tempDf = tempDf.stack()
+    tempDf.columns.name = 'type'
     return tempDf[['addup_len','addup_sum']]
 
 class FeaFactory():
@@ -145,131 +146,180 @@ class FeaFactory():
         df = df.merge(self.userDf, how='left', on='user_id')
         df['user_his_month'] = (df['year_month'] - df['user_first_date']).dt.days // 30
 
-        # 历史行为统计
-        startTime = datetime.now()
-        tempDf = statYearMonthLenSum(self.actionDf, index=['user_id','cate','a_type'], values='a_num', skipLen=params['skipLen'])
-        del tempDf['addup_len']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.set_levels(['view','follow'], level='a_type')
-        tempDf.columns = ['user_cate%s_his_%s'%(x[0],x[1]) for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
+        def hisMonthStat(df, monthLen=None):
+            startTime = datetime.now()
+            feaFlag = 'last%smonth'%monthLen if monthLen!=None else 'permonth'
+            if monthLen!=None:
+                tempMonth = pd.to_datetime(params['startDate']) - timedelta(days=31*monthLen)
+            # 统计浏览与关注的次数
+            if monthLen!=None:
+                tempDf = self.actionDf[self.actionDf.year_month >= tempMonth]
+                tempDf = statYearMonthLenSum(tempDf, index=['user_id','cate','a_type'], values='a_num', statLen=monthLen)
+            else:
+                tempDf = statYearMonthLenSum(self.actionDf, index=['user_id','cate','a_type'], values='a_num', skipLen=params['skipLen'])
+            del tempDf['addup_len']
+            tempDf = tempDf.unstack(level=1)
+            tempDf.columns = tempDf.columns.droplevel()
+            tempDf.fillna(0,inplace=True)
+            tempDf['all'] = tempDf.sum(axis=1)
+            tempDf['task'] = tempDf[101] + tempDf[30]
+            tempDf['other'] = tempDf['all'] - tempDf['task']
+            tempDf = tempDf.unstack(level=1)
+            tempDf.columns = tempDf.columns.set_levels(['view','follow'], level='a_type')
+            tempDf.columns = ['user_cate%s_%s_%s'%(x[0],feaFlag,x[1]) for x in tempDf.columns]
+            df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
+            df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
+            if monthLen==None:
+                for k in tempDf.columns.values:
+                    df[k] = df[k] / df['user_his_month']
+            # 统计浏览与关注的天数
+            if monthLen!=None:
+                tempDf = self.actionDf[self.actionDf.year_month >= tempMonth]
+                tempDf = statYearMonthLenSum(tempDf.drop_duplicates(subset=['user_id','cate','a_type','a_date']), index=['user_id','cate','a_type'], values='a_num', statLen=monthLen)
+            else:
+                tempDf = statYearMonthLenSum(self.actionDf.drop_duplicates(subset=['user_id','cate','a_type','a_date']), index=['user_id','cate','a_type'], values='a_num', skipLen=params['skipLen'])
+            tempDf = tempDf['addup_len'].unstack(level='cate')
+            tempDf.fillna(0,inplace=True)
+            tempDf['all'] = tempDf.sum(axis=1)
+            tempDf['task'] = tempDf[101] + tempDf[30]
+            tempDf['other'] = tempDf['all'] - tempDf['task']
+            tempDf = tempDf.rename(index={1:'view', 2:'follow'}, level='a_type').unstack(level='a_type')
+            tempDf.columns = ['user_cate%s_%s_%sday'%(cate,feaFlag,type) for cate,type in tempDf.columns]
+            df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
+            df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
+            if monthLen==None:
+                for k in tempDf.columns.values:
+                    df[k] = df[k] / df['user_his_month']
+            # 统计浏览与关注的商品数
+            if monthLen!=None:
+                tempDf = self.actionDf[self.actionDf.year_month >= tempMonth]
+                tempDf = statYearMonthLenSum(tempDf, index=['user_id','cate','sku_id'], values='a_num', statLen=monthLen)
+            else:
+                tempDf = statYearMonthLenSum(self.actionDf, index=['user_id','cate','sku_id'], values='a_num', skipLen=params['skipLen'])
+            del tempDf['addup_sum']
+            tempDf = (tempDf>0).astype(int)
+            tempDf = tempDf.reset_index().groupby(['user_id','year_month','cate'])['addup_len'].sum()
+            tempDf = tempDf.unstack('cate')
+            tempDf.fillna(0,inplace=True)
+            tempDf['all'] = tempDf.sum(axis=1)
+            tempDf['task'] = tempDf[101] + tempDf[30]
+            tempDf['other'] = tempDf['all'] - tempDf['task']
+            tempDf.columns = ['user_cate%s_%s_sku'%(x,feaFlag) for x in tempDf.columns]
+            df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
+            df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
+            if monthLen==None:
+                for k in tempDf.columns.values:
+                    df[k] = df[k] / df['user_his_month']
+            # 统计订单数与平均下单日
+            if monthLen!=None:
+                tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
+                tempDf = statYearMonthLenSum(tempDf.drop_duplicates(subset=['o_id','cate']), index=['user_id','cate'], values='day', statLen=monthLen)
+            else:
+                tempDf = statYearMonthLenSum(self.orderDf.drop_duplicates(subset=['o_id','cate']), index=['user_id','cate'], values='day', skipLen=params['skipLen'])
+            tempDf = tempDf.stack(level=['type']).unstack(level='cate')
+            tempDf.fillna(0,inplace=True)
+            tempDf['all'] = tempDf.sum(axis=1)
+            tempDf['task'] = tempDf[101] + tempDf[30]
+            tempDf['other'] = tempDf['all'] - tempDf['task']
+            tempDf = tempDf.rename(columns=str).stack().unstack(level='type').rename(columns={'addup_len':'len','addup_sum':'sum'})
+            tempDf['mean'] = tempDf['sum'] / tempDf['len']
+            del tempDf['sum']
+            tempDf = tempDf.unstack(level='cate')
+            tempDf.columns = [('user_cate%s_%s_order'%(cate,feaFlag) if type=='len' else 'user_cate%s_%s_order_daymean'%(cate,feaFlag)) for type,cate in tempDf.columns]
+            df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
+            df.fillna({'user_cate%s_%s_order'%(k,feaFlag):0 for k in cateList}, inplace=True)
+            if monthLen==None:
+                for k in cateList:
+                    df['user_cate%s_%s_order'%(k,feaFlag)] = df['user_cate%s_%s_order'%(k,feaFlag)] / df['user_his_month']
+            # 统计下单天数
+            if monthLen!=None:
+                tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
+                tempDf = statYearMonthLenSum(tempDf.drop_duplicates(subset=['user_id','cate','o_date']), index=['user_id','cate'], values='o_sku_num', statLen=monthLen)
+            else:
+                tempDf = statYearMonthLenSum(self.orderDf.drop_duplicates(subset=['user_id','cate','o_date']), index=['user_id','cate'], values='o_sku_num', skipLen=params['skipLen'])
+            del tempDf['addup_sum']
+            tempDf = tempDf.unstack(level=1)
+            tempDf.columns = tempDf.columns.droplevel()
+            tempDf.fillna(0,inplace=True)
+            tempDf['all'] = tempDf.sum(axis=1)
+            tempDf['task'] = tempDf[101] + tempDf[30]
+            tempDf['other'] = tempDf['all'] - tempDf['task']
+            tempDf.columns = ['user_cate%s_%s_orderday'%(x,feaFlag) for x in tempDf.columns]
+            df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
+            df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
+            if monthLen==None:
+                for k in tempDf.columns.values:
+                    df[k] = df[k] / df['user_his_month']
+            # 统计下单商品数及商品件数
+            if monthLen!=None:
+                tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
+                tempDf = statYearMonthLenSum(tempDf, index=['user_id','cate'], values='o_sku_num', statLen=monthLen)
+            else:
+                tempDf = statYearMonthLenSum(self.orderDf, index=['user_id','cate'], values='o_sku_num', skipLen=params['skipLen'])
+            tempDf = tempDf.stack().unstack(level='cate')
+            tempDf.fillna(0,inplace=True)
+            tempDf['all'] = tempDf.sum(axis=1)
+            tempDf['task'] = tempDf[101] + tempDf[30]
+            tempDf['other'] = tempDf['all'] - tempDf['task']
+            tempDf = tempDf.rename(index={'addup_len':'len','addup_sum':'sum'}, level='type').unstack(level='type')
+            tempDf.columns = ['user_cate%s_%s_ordersku_%s'%(cate,feaFlag,type) for cate,type in tempDf.columns]
+            df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
+            df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
+            if monthLen==None:
+                for k in tempDf.columns.values:
+                    df[k] = df[k] / df['user_his_month']
+            # 统计最早下单日和最晚下单日
+            if monthLen!=None:
+                tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
+                tempDf = pd.pivot_table(tempDf, index=['user_id','cate'], columns='year_month', values='day', aggfunc=[np.min,np.max])
+                for i,dt in enumerate(pd.date_range(start=params['startDate'], end=params['endDate'], freq='MS')):
+                    tempDf.loc[:,pd.IndexSlice['min',dt]] = tempDf['amin'].iloc[:,i:i+monthLen].min(axis=1)
+                    tempDf.loc[:,pd.IndexSlice['max',dt]] = tempDf['amax'].iloc[:,i:i+monthLen].max(axis=1)
+            else:
+                tempDf = pd.pivot_table(self.orderDf, index=['user_id','cate'], columns='year_month', values='day', aggfunc=[np.min,np.max])
+                for i,dt in enumerate(pd.date_range(start=params['startDate'], end=params['endDate'], freq='MS')):
+                    tempDf.loc[:,pd.IndexSlice['min',dt]] = tempDf['amin'].iloc[:,:i+params['skipLen']].min(axis=1)
+                    tempDf.loc[:,pd.IndexSlice['max',dt]] = tempDf['amax'].iloc[:,:i+params['skipLen']].max(axis=1)
+            tempDf.columns.names = ['type','year_month']
+            tempDf = tempDf.stack(level=['year_month'])[['min','max']].unstack('cate')
+            tempDf.loc[:,pd.IndexSlice['min','all']] = tempDf['min'].min(axis=1)
+            tempDf.loc[:,pd.IndexSlice['max','all']] = tempDf['max'].max(axis=1)
+            tempDf.loc[:,pd.IndexSlice['min','task']] = tempDf['min'][[101,30]].min(axis=1)
+            tempDf.loc[:,pd.IndexSlice['max','task']] = tempDf['max'][[101,30]].max(axis=1)
+            tempDf.loc[:,pd.IndexSlice['min','other']] = tempDf['min'][list(set(cateList)-set([101,30]))].min(axis=1)
+            tempDf.loc[:,pd.IndexSlice['max','other']] = tempDf['max'][list(set(cateList)-set([101,30]))].max(axis=1)
+            tempDf.columns = ['user_cate%s_%s_order_day%s'%(cate,feaFlag,type) for type,cate in tempDf.columns]
+            df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
+            # 统计下单月数
+            if monthLen!=None:
+                tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
+                tempDf = pd.pivot_table(tempDf, index=['user_id','cate'], columns='year_month', values='o_id', aggfunc=[len])
+                tempDf = (tempDf>0).astype(int)
+                for i,dt in enumerate(pd.date_range(start=params['startDate'], end=params['endDate'], freq='MS')):
+                    tempDf.loc[:,pd.IndexSlice['has_order',dt]] = tempDf['len'].iloc[:,i:i+monthLen].sum(axis=1)
+            else:
+                tempDf = pd.pivot_table(self.orderDf, index=['user_id','cate'], columns='year_month', values='o_id', aggfunc=[len])
+                tempDf = (tempDf>0).astype(int)
+                for i,dt in enumerate(pd.date_range(start=params['startDate'], end=params['endDate'], freq='MS')):
+                    tempDf.loc[:,pd.IndexSlice['has_order',dt]] = tempDf['len'].iloc[:,:i+params['skipLen']].sum(axis=1)
+            tempDf = tempDf.stack(level=['year_month'])['has_order'].unstack('cate')
+            tempDf.fillna(0,inplace=True)
+            tempDf['all'] = tempDf.sum(axis=1)
+            tempDf['task'] = tempDf[101] + tempDf[30]
+            tempDf['other'] = tempDf['all'] - tempDf['task']
+            tempDf.columns = ['user_cate%s_%s_ordermonth'%(x,feaFlag) for x in tempDf.columns]
+            df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
+            df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
+            if monthLen==None:
+                for k in tempDf.columns.values:
+                    df[k] = df[k] / df['user_his_month']
 
-        tempDf = statYearMonthLenSum(self.orderDf.drop_duplicates(subset=['o_id','cate']), index=['user_id','cate'], values='o_sku_num', skipLen=params['skipLen'])
-        del tempDf['addup_sum']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf.columns = ['user_cate%s_his_order'%x for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-        for x in cateList+['all','task','other']:
-            df['user_cate%s_his_order_permonth'%x] = df['user_cate%s_his_order'%x] / (df['user_his_month']+1)
-
-        tempDf = statYearMonthLenSum(self.orderDf.drop_duplicates(subset=['user_id','cate','o_date']), index=['user_id','cate'], values='o_sku_num', skipLen=params['skipLen'])
-        del tempDf['addup_sum']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf.columns = ['user_cate%s_his_orderday'%x for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-        for x in cateList+['all','task','other']:
-            df['user_cate%s_his_orderday_permonth'%x] = df['user_cate%s_his_orderday'%x] / (df['user_his_month']+1)
-        print('user his stat:', datetime.now() - startTime)
-
-        # 过去一个月行为统计
-        startTime = datetime.now()
-        tempMonth = pd.to_datetime(params['startDate']) - timedelta(days=31)
-        tempDf = self.actionDf[self.actionDf.year_month >= tempMonth]
-        tempDf = statYearMonthLenSum(tempDf, index=['user_id','cate','a_type'], values='a_num', statLen=1)
-        del tempDf['addup_len']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.set_levels(['view','follow'], level='a_type')
-        tempDf.columns = ['user_cate%s_lastmonth_%s'%(x[0],x[1]) for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-
-        tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
-        tempDf = statYearMonthLenSum(tempDf.drop_duplicates(subset=['o_id','cate']), index=['user_id','cate'], values='o_sku_num', statLen=1)
-        del tempDf['addup_sum']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf.columns = ['user_cate%s_lastmonth_order'%x for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-
-        tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
-        tempDf = statYearMonthLenSum(tempDf.drop_duplicates(subset=['user_id','cate','o_date']), index=['user_id','cate'], values='o_sku_num', statLen=1)
-        del tempDf['addup_sum']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf.columns = ['user_cate%s_lastmonth_orderday'%x for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-        print('user last month stat:', datetime.now() - startTime)
-
-        # 过去3个月行为统计
-        startTime = datetime.now()
-        tempMonth = pd.to_datetime(params['startDate']) - timedelta(days=31*3)
-        tempDf = self.actionDf[self.actionDf.year_month >= tempMonth]
-        tempDf = statYearMonthLenSum(tempDf, index=['user_id','cate','a_type'], values='a_num', statLen=3)
-        del tempDf['addup_len']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.set_levels(['view','follow'], level='a_type')
-        tempDf.columns = ['user_cate%s_last3month_%s'%(x[0],x[1]) for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-
-        tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
-        tempDf = statYearMonthLenSum(tempDf.drop_duplicates(subset=['o_id','cate']), index=['user_id','cate'], values='o_sku_num', statLen=3)
-        del tempDf['addup_sum']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf.columns = ['user_cate%s_last3month_order'%x for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-
-        tempDf = self.orderDf[self.orderDf.year_month >= tempMonth]
-        tempDf = statYearMonthLenSum(tempDf.drop_duplicates(subset=['user_id','cate','o_date']), index=['user_id','cate'], values='o_sku_num', statLen=3)
-        del tempDf['addup_sum']
-        tempDf = tempDf.unstack(level=1)
-        tempDf.columns = tempDf.columns.droplevel()
-        tempDf['all'] = tempDf.sum(axis=1)
-        tempDf['task'] = tempDf[101] + tempDf[30]
-        tempDf['other'] = tempDf['all'] - tempDf['task']
-        tempDf.columns = ['user_cate%s_last3month_orderday'%x for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-        print('user last 3month stat:', datetime.now() - startTime)
+            print('user %s stat:'%feaFlag, datetime.now() - startTime)
+            return df
+        df = hisMonthStat(df)
+        df = hisMonthStat(df, monthLen=1)
+        df = hisMonthStat(df, monthLen=3)
+        # df = hisMonthStat(df, monthLen=6)
 
         # # 月末1天行为统计
         # startTime = datetime.now()
@@ -321,61 +371,36 @@ class FeaFactory():
         # df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
         # print('user last 3days stat:', datetime.now() - startTime)
 
-        # 月周期性行为统计
-        # startTime = datetime.now()
-        # tempDf = statYearMonthLenSum(self.actionDf, index=['user_id','cate','a_type'], values='day', skipLen=params['skipLen'])
-        # print(tempDf.head())
-        # del tempDf['addup_len']
-        # tempDf = tempDf.unstack(level=1)
-        # tempDf.columns = tempDf.columns.droplevel()
-        # tempDf['all'] = tempDf.sum(axis=1)
-        # tempDf = tempDf.unstack(level=1)
-        # tempDf.columns = tempDf.columns.set_levels(['view','follow'], level='a_type')
-        # tempDf.columns = ['user_cate%s_endday3_%s'%(x[0],x[1]) for x in tempDf.columns]
-        # df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        # df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-        #
-        # tempDf = self.orderDf[(self.orderDf.year_month >= tempMonth)&(self.orderDf.day_of_month_end <= 3)]
-        # tempDf = statYearMonthLenSum(tempDf.drop_duplicates(subset=['o_id','cate']), index=['user_id','cate'], values='o_sku_num', skipLen=params['skipLen'])
-        # del tempDf['addup_sum']
-        # tempDf = tempDf.unstack(level=1)
-        # tempDf.columns = tempDf.columns.droplevel()
-        # tempDf['all'] = tempDf.sum(axis=1)
-        # tempDf.columns = ['user_cate%s_endday3_order'%x for x in tempDf.columns]
-        # df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
-        # df.fillna({k:0 for k in tempDf.columns.values}, inplace=True)
-        # print('user period stat:', datetime.now() - startTime)
-
         # 距离上次行为时间
-        startTime = datetime.now()
-        tempDf = pd.pivot_table(self.actionDf, index=['year_month'], columns=['user_id','cate','a_type'], values='a_date', aggfunc=np.max)
-        tempDf.index = tempDf.index.shift(1,freq='MS')
-        tempDf.fillna(method='ffill', inplace=True)
-        tempDf = tempDf.stack(level=['user_id','a_type'])
-        tempDf['all'] = tempDf.max(axis=1)
-        tempDf = tempDf.stack(level=['cate'])
-        tempDf = (tempDf.index.get_level_values('year_month').values - tempDf).dt.days
-        tempDf.index.set_levels(['view','follow'], level='a_type', inplace=True)
-        tempDf = tempDf.unstack(level=['cate','a_type'])
-        tempDf.columns = ['user_cate%s_last_%s_timedelta'%(x[0],x[1]) for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['year_month','user_id'], right_index=True)
-        df.fillna({k:999 for k in tempDf.columns.values}, inplace=True)
-
-        tempDf = pd.pivot_table(self.orderDf, index=['year_month'], columns=['user_id','cate'], values='o_date', aggfunc=np.max)
-        tempDf.index = tempDf.index.shift(1,freq='MS')
-        tempDf.fillna(method='ffill', inplace=True)
-        tempDf = tempDf.stack(level=['user_id'])
-        tempDf['all'] = tempDf.max(axis=1)
-        tempDf = tempDf.stack(level=['cate'])
-        tempDf = (tempDf.index.get_level_values('year_month').values - tempDf).dt.days
-        tempDf = tempDf.unstack(level=['cate'])
-        tempDf.columns = ['user_cate%s_last_order_timedelta'%x for x in tempDf.columns]
-        df = df.merge(tempDf, how='left', left_on=['year_month','user_id'], right_index=True)
-        df.fillna({k:999 for k in tempDf.columns.values}, inplace=True)
-        for x in cateList+['all']:
-            df['user_cate%s_last_order_view_timedelta'%x] = df['user_cate%s_last_order_timedelta'%x] - df['user_cate%s_last_view_timedelta'%x]
-            df['user_cate%s_last_order_follow_timedelta'%x] = df['user_cate%s_last_order_timedelta'%x] - df['user_cate%s_last_follow_timedelta'%x]
-        print('user last timedelta:', datetime.now() - startTime)
+        # startTime = datetime.now()
+        # tempDf = pd.pivot_table(self.actionDf, index=['year_month'], columns=['user_id','cate','a_type'], values='a_date', aggfunc=np.max)
+        # tempDf.index = tempDf.index.shift(1,freq='MS')
+        # tempDf.fillna(method='ffill', inplace=True)
+        # tempDf = tempDf.stack(level=['user_id','a_type'])
+        # tempDf['all'] = tempDf.max(axis=1)
+        # tempDf = tempDf.stack(level=['cate'])
+        # tempDf = (tempDf.index.get_level_values('year_month').values - tempDf).dt.days
+        # tempDf.index.set_levels(['view','follow'], level='a_type', inplace=True)
+        # tempDf = tempDf.unstack(level=['cate','a_type'])
+        # tempDf.columns = ['user_cate%s_last_%s_timedelta'%(x[0],x[1]) for x in tempDf.columns]
+        # df = df.merge(tempDf, how='left', left_on=['year_month','user_id'], right_index=True)
+        # df.fillna({k:999 for k in tempDf.columns.values}, inplace=True)
+        #
+        # tempDf = pd.pivot_table(self.orderDf, index=['year_month'], columns=['user_id','cate'], values='o_date', aggfunc=np.max)
+        # tempDf.index = tempDf.index.shift(1,freq='MS')
+        # tempDf.fillna(method='ffill', inplace=True)
+        # tempDf = tempDf.stack(level=['user_id'])
+        # tempDf['all'] = tempDf.max(axis=1)
+        # tempDf = tempDf.stack(level=['cate'])
+        # tempDf = (tempDf.index.get_level_values('year_month').values - tempDf).dt.days
+        # tempDf = tempDf.unstack(level=['cate'])
+        # tempDf.columns = ['user_cate%s_last_order_timedelta'%x for x in tempDf.columns]
+        # df = df.merge(tempDf, how='left', left_on=['year_month','user_id'], right_index=True)
+        # df.fillna({k:999 for k in tempDf.columns.values}, inplace=True)
+        # for x in cateList+['all']:
+        #     df['user_cate%s_last_order_view_timedelta'%x] = df['user_cate%s_last_order_timedelta'%x] - df['user_cate%s_last_view_timedelta'%x]
+        #     df['user_cate%s_last_order_follow_timedelta'%x] = df['user_cate%s_last_order_timedelta'%x] - df['user_cate%s_last_follow_timedelta'%x]
+        # print('user last timedelta:', datetime.now() - startTime)
 
         # 计算用户各类别下单间隔
         startTime = datetime.now()
@@ -397,15 +422,15 @@ class FeaFactory():
         tempDf.columns = ['user_cate%s_order_daydelta_mean'%x for x in tempDf.columns]
         df = df.merge(tempDf, how='left', left_on=['user_id','year_month'], right_index=True)
         print('user cate daydelta mean:', datetime.now() - startTime)
-        # 根据平均间隔推算各类目下次购买时间
-        startTime = datetime.now()
-        for x in set(self.skuDf.cate):
-            temp = df['user_cate%s_order_daydelta_mean'%x].fillna(cateDayDelta[x])
-            df['cate%s_next_order_pred'%x] = temp - df['user_cate%s_last_order_timedelta'%x]
-        print('user next cate order predict:', datetime.now() - startTime)
+        # # 根据平均间隔推算各类目下次购买时间
+        # startTime = datetime.now()
+        # for x in set(self.skuDf.cate):
+        #     temp = df['user_cate%s_order_daydelta_mean'%x].fillna(cateDayDelta[x])
+        #     df['cate%s_next_order_pred'%x] = temp - df['user_cate%s_last_order_timedelta'%x]
+        # print('user next cate order predict:', datetime.now() - startTime)
         return df
 
-    def getFeaDf(self, startDate='2016-08-01', endDate='2017-05-01'):
+    def getFeaDf(self, startDate='2017-03-01', endDate='2017-05-01'):
         params = {
             'startDate': startDate,
             'endDate': endDate,
@@ -569,11 +594,11 @@ def score2(labelList, predList):
 def main():
     # 数据导入
     startTime = datetime.now()
-    userDf = importDf('./data/jdata_user_basic_info.csv')
-    skuDf = importDf('./data/jdata_sku_basic_info.csv')
-    actionDf = importDf('./data/jdata_user_action.csv')
-    orderDf = importDf('./data/jdata_user_order.csv')
-    commDf = importDf('./data/jdata_user_comment_score.csv')
+    userDf = importDf('../data/jdata_user_basic_info.csv')
+    skuDf = importDf('../data/jdata_sku_basic_info.csv')
+    actionDf = importDf('../data/jdata_user_action.csv')
+    orderDf = importDf('../data/jdata_user_order.csv')
+    commDf = importDf('../data/jdata_user_comment_score.csv')
     # userList = userDf.sample(frac=0.5)['user_id'].values
     # dfs = {
     #     'user_df': userDf[userDf.user_id.isin(userList)],
@@ -593,39 +618,78 @@ def main():
 
     # 特征工程
     feaFactory = FeaFactory(dfs)
-    df = feaFactory.getFeaDf()
+    df = feaFactory.getFeaDf(startDate='2017-02-01', endDate='2017-05-01')
     print('train user num:', df.year_month.value_counts())
     fea = [
-        'age','sex','user_lv_cd','user_his_month',
+        'age','sex','user_lv_cd',#'user_his_month',
         ]
     cateList = list(set(skuDf.cate))
-    fea.extend(['user_cate%s_his_view'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_his_follow'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_his_order'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_his_order_permonth'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_his_orderday'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_his_orderday_permonth'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_lastmonth_view'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_lastmonth_follow'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_lastmonth_order'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_lastmonth_orderday'%x for x in cateList+['all','task','other']])
+    fea.extend(['user_cate%s_permonth_view'%x for x in cateList+['all','task','other']])
+    # fea.extend(['user_cate%s_permonth_follow'%x for x in cateList+['all','task','other']])
+    fea.extend(['user_cate%s_permonth_viewday'%x for x in ['task']])
+    # fea.extend(['user_cate%s_permonth_followday'%x for x in ['task']])
+    fea.extend(['user_cate%s_permonth_sku'%x for x in ['task']])
+    fea.extend(['user_cate%s_permonth_order'%x for x in cateList+['all','task','other']])
+    fea.extend(['user_cate%s_permonth_orderday'%x for x in cateList+['all','task','other']])
+    fea.extend(['user_cate%s_permonth_order_daymean'%x for x in ['task']])
+    fea.extend(['user_cate%s_permonth_ordersku_len'%x for x in [101,30,'task','other']])
+    fea.extend(['user_cate%s_permonth_ordersku_sum'%x for x in ['task']])
+    fea.extend(['user_cate%s_permonth_order_daymin'%x for x in ['task',30,101]])
+    fea.extend(['user_cate%s_permonth_order_daymax'%x for x in ['task']])
+    fea.extend(['user_cate%s_permonth_ordermonth'%x for x in ['task']])
+    fea.extend(['user_cate%s_last1month_view'%x for x in cateList+['all','task','other']])
+    # fea.extend(['user_cate%s_last1month_follow'%x for x in cateList+['all','task','other']])
+    fea.extend(['user_cate%s_last1month_viewday'%x for x in ['task']])
+    # fea.extend(['user_cate%s_last1month_followday'%x for x in ['task']])
+    fea.extend(['user_cate%s_last1month_sku'%x for x in ['task']])
+    fea.extend(['user_cate%s_last1month_order'%x for x in cateList+['all','task','other']])
+    fea.extend(['user_cate%s_last1month_orderday'%x for x in cateList+['all','task','other']])
+    fea.extend(['user_cate%s_last1month_order_daymean'%x for x in ['task']])
+    fea.extend(['user_cate%s_last1month_ordersku_len'%x for x in [101,30,'task','other']])
+    fea.extend(['user_cate%s_last1month_ordersku_sum'%x for x in ['task']])
+    fea.extend(['user_cate%s_last1month_order_daymin'%x for x in ['task',30,101]])
+    fea.extend(['user_cate%s_last1month_order_daymax'%x for x in ['task']])
+    fea.extend(['user_cate%s_last1month_ordermonth'%x for x in ['task']])
     fea.extend(['user_cate%s_last3month_view'%x for x in cateList+['all','task','other']])
-    fea.extend(['user_cate%s_last3month_follow'%x for x in cateList+['all','task','other']])
+    # fea.extend(['user_cate%s_last3month_follow'%x for x in cateList+['all','task','other']])
+    fea.extend(['user_cate%s_last3month_viewday'%x for x in ['task']])
+    # fea.extend(['user_cate%s_last3month_followday'%x for x in ['task']])
+    fea.extend(['user_cate%s_last3month_sku'%x for x in ['task']])
     fea.extend(['user_cate%s_last3month_order'%x for x in cateList+['all','task','other']])
     fea.extend(['user_cate%s_last3month_orderday'%x for x in cateList+['all','task','other']])
-    # fea.extend(['user_cate%s_endday1_view'%x for x in cateList+['all']])
-    # fea.extend(['user_cate%s_endday1_follow'%x for x in cateList+['all']])
-    # fea.extend(['user_cate%s_endday1_order'%x for x in cateList+['all']])
-    # fea.extend(['user_cate%s_endday3_view'%x for x in cateList+['all']])
-    # fea.extend(['user_cate%s_endday3_follow'%x for x in cateList+['all']])
-    # fea.extend(['user_cate%s_endday3_order'%x for x in cateList+['all']])
-    fea.extend(['user_cate%s_last_view_timedelta'%x for x in cateList+['all']])
-    fea.extend(['user_cate%s_last_follow_timedelta'%x for x in cateList+['all']])
-    fea.extend(['user_cate%s_last_order_timedelta'%x for x in cateList+['all']])
-    fea.extend(['user_cate%s_last_order_view_timedelta'%x for x in cateList+['all']])
-    fea.extend(['user_cate%s_last_order_follow_timedelta'%x for x in cateList+['all']])
+    fea.extend(['user_cate%s_last3month_order_daymean'%x for x in ['task']])
+    fea.extend(['user_cate%s_last3month_ordersku_len'%x for x in [101,30,'task','other']])
+    fea.extend(['user_cate%s_last3month_ordersku_sum'%x for x in ['task']])
+    fea.extend(['user_cate%s_last3month_order_daymin'%x for x in ['task',30,101]])
+    fea.extend(['user_cate%s_last3month_order_daymax'%x for x in ['task']])
+    fea.extend(['user_cate%s_last3month_ordermonth'%x for x in ['task']])
+    # fea.extend(['user_cate%s_last6month_view'%x for x in cateList+['all','task','other']])
+    # # fea.extend(['user_cate%s_last6month_follow'%x for x in cateList+['all','task','other']])
+    # fea.extend(['user_cate%s_last6month_viewday'%x for x in ['task']])
+    # # fea.extend(['user_cate%s_last6month_followday'%x for x in ['task']])
+    # fea.extend(['user_cate%s_last6month_sku'%x for x in ['task']])
+    # fea.extend(['user_cate%s_last6month_order'%x for x in cateList+['all','task','other']])
+    # fea.extend(['user_cate%s_last6month_orderday'%x for x in cateList+['all','task','other']])
+    # fea.extend(['user_cate%s_last6month_order_daymean'%x for x in ['task']])
+    # fea.extend(['user_cate%s_last6month_ordersku_len'%x for x in [101,30,'task','other']])
+    # fea.extend(['user_cate%s_last6month_ordersku_sum'%x for x in ['task']])
+    # fea.extend(['user_cate%s_last6month_order_daymin'%x for x in ['task',30,101]])
+    # fea.extend(['user_cate%s_last6month_order_daymax'%x for x in ['task']])
+    # fea.extend(['user_cate%s_last6month_ordermonth'%x for x in ['task']])
+
+    # # fea.extend(['user_cate%s_endday1_view'%x for x in cateList+['all']])
+    # # fea.extend(['user_cate%s_endday1_follow'%x for x in cateList+['all']])
+    # # fea.extend(['user_cate%s_endday1_order'%x for x in cateList+['all']])
+    # # fea.extend(['user_cate%s_endday3_view'%x for x in cateList+['all']])
+    # # fea.extend(['user_cate%s_endday3_follow'%x for x in cateList+['all']])
+    # # fea.extend(['user_cate%s_endday3_order'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_last_view_timedelta'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_last_follow_timedelta'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_last_order_timedelta'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_last_order_view_timedelta'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_last_order_follow_timedelta'%x for x in cateList+['all']])
     fea.extend(['user_cate%s_order_daydelta_mean'%x for x in cateList])
-    fea.extend(['cate%s_next_order_pred'%x for x in cateList])
+    # fea.extend(['cate%s_next_order_pred'%x for x in cateList])
     print(df[fea].info())
     # exit()
 
@@ -638,7 +702,7 @@ def main():
     dateModel = XgbModel(feaNames=fea, params=dateParams)
     feaScoreDf = pd.DataFrame(index=fea)
     costDf = pd.DataFrame(index=['auc','score1','rmse','score2','score'])
-    for dt in pd.date_range(start='2017-02-01', end='2017-04-01', freq='MS'):
+    for dt in pd.date_range(start='2017-03-01', end='2017-04-01', freq='MS'):
         trainDf = df[(df.year_month<dt)&(df.year_month>=dt-timedelta(days=31))]
         # trainDf = df[(df.year_month<dt)]
         testDf = df[df.year_month==dt]
@@ -655,7 +719,6 @@ def main():
         costDf.loc['score1',dt.strftime('%Y-%m-%d')] = score1(getRankDf(testDf, 'buy_predict')['buy_label'].values)
         # costDf.loc['oof_cost',dt.strftime('%Y-%m-%d')] = metrics.log_loss(testDf['is_trade'].values, testDf['oof_predict'].values)
 
-        # hasBuyIdx = df[df.date_label.notnull()].index
         dateModel.trainCV(trainDf[trainDf.day_label.notnull()][fea].values, trainDf[trainDf.day_label.notnull()]['day_label'].values)
         testDf.loc[:,'day_predict'] = dateModel.predict(testDf[fea].values)
         # trainDf.loc[:,'buy_predict'],testDf.loc[:,'buy_predict'] = getOof(dateModel, trainDf[fea].values, trainDf['buy_label'].values, testDf[fea].values, stratify=True)
@@ -672,20 +735,20 @@ def main():
         # costDf.loc['oof_cost',dt.strftime('%Y-%m-%d')] = metrics.log_loss(testDf['is_trade'].values, testDf['oof_predict'].values)
     print(feaScoreDf.iloc[:60], feaScoreDf.iloc[60:])
     print(costDf)
-    exit()
+    # exit()
 
     # 正式模型
-    modelName = 'buyModel1_single_month'
-    trainDf = df[df.year_month<date(2017,5,1)]
+    modelName = 'buyModel1'
+    trainDf = df[df.year_month==date(2017,4,1)]
     print(len(trainDf))
     testDf = df[df.year_month==date(2017,5,1)]
     buyModel.trainCV(trainDf[fea].values, trainDf['buy_label'].values)
     buyModel.getFeaScore(show=True)
     testDf.loc[:,'buy_predict'] = buyModel.predict(testDf[fea].values)
-    dateModel.trainCV(trainDf[trainDf.day_label.notnull()][fea].values, trainDf[trainDf.day_label.notnull()]['day_label'].values)
-    dateModel.getFeaScore(show=True)
-    testDf.loc[:,'day_predict'] = dateModel.predict(testDf[fea].values)
-    print('invalid:', resultDf[(resultDf.day_predict<1)|(resultDf.day_predict>31)][['user_id','buy_predict','day_predict']])
+    # dateModel.trainCV(trainDf[trainDf.day_label.notnull()][fea].values, trainDf[trainDf.day_label.notnull()]['day_label'].values)
+    # dateModel.getFeaScore(show=True)
+    # testDf.loc[:,'day_predict'] = dateModel.predict(testDf[fea].values)
+    testDf['day_predict'] = 14
     resultDf = getRankDf(testDf[(testDf.day_predict>0)&(testDf.day_predict<32)], rankCol='buy_predict')
     resultDf['pred_date'] = resultDf['day_predict'].map(lambda x: '2017-05-%02d'%x)
     print(resultDf.head(20)[['user_id','buy_predict','day_predict']])
