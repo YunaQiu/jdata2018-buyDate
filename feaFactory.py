@@ -512,6 +512,7 @@ class FeaFactory():
 
             return df
         df = hisMonthStat(df)
+        df = hisMonthStat(df, dayLen=15)
         df = hisMonthStat(df, dayLen=30)
         df = hisMonthStat(df, dayLen=90)
         #
@@ -542,11 +543,10 @@ class FeaFactory():
         return df
 
     def getFeaDf(self, startDate=None, endDate='2017-05-01', periods=None, freq=30, predictLen=31):
-        # if periods == None:
-        #     periods = (pd.to_datetime(endDate) - pd.to_datetime(startDate)).days // freq + 1
-        #     startDate = None
-        # dateList = pd.date_range(start=startDate, end=endDate, periods=periods, freq='%dD'%freq)
-        dateList = getDateList(startDate, endDate, periods, freq)
+        if periods == None:
+            periods = (pd.to_datetime(endDate) - pd.to_datetime(startDate)).days // freq + 1
+            startDate = None
+        dateList = pd.date_range(start=startDate, end=endDate, periods=periods, freq='%dD'%freq)
         params = {
             'startDate': dateList[0],
             'endDate':dateList[-1],
@@ -555,125 +555,6 @@ class FeaFactory():
         df = self.initDf(dateList, predictLen=predictLen, **params)
         df = self.addUserFea(df, **params)
         return df
-
-def getDateList(startDate=None, endDate='2017-05-01', periods=None, freq=30):
-    if periods == None:
-        periods = (pd.to_datetime(endDate) - pd.to_datetime(startDate)).days // freq + 1
-        startDate = None
-    dateList = pd.date_range(start=startDate, end=endDate, periods=periods, freq='%dD'%freq)
-    return dateList
-
-class XgbModel:
-    def __init__(self, feaNames=None, params={}):
-        self.feaNames = feaNames
-        self.params = {
-            'objective': 'reg:linear',
-            'eval_metric':'rmse',
-            'silent': True,
-            'eta': 0.1,
-            'max_depth': 4,
-            'gamma': 20,
-            'subsample': 0.95,
-            'colsample_bytree': 1,
-            'min_child_weight': 9,
-            # 'scale_pos_weight': 1.2,
-            'lambda': 500,
-            # 'nthread': 20,
-            }
-        for k,v in params.items():
-            self.params[k] = v
-        self.clf = None
-
-    def train(self, X, y, train_size=1, test_size=0.1, verbose=True, num_boost_round=1000, early_stopping_rounds=3):
-        X = X.astype(float)
-        if train_size==1:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size)
-            X_train, y_train = X, y
-        else:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=train_size)
-        dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=self.feaNames)
-        dval = xgb.DMatrix(X_test, label=y_test, feature_names=self.feaNames)
-        watchlist = [(dtrain,'train'),(dval,'val')]
-        clf = xgb.train(
-            self.params, dtrain,
-            num_boost_round = num_boost_round,
-            evals = watchlist,
-            early_stopping_rounds = early_stopping_rounds,
-            verbose_eval=verbose
-        )
-        self.clf = clf
-
-    def trainCV(self, X, y, nFold=3, verbose=True, num_boost_round=8000, early_stopping_rounds=30, weight=None):
-        X = X.astype(float)
-        dtrain = xgb.DMatrix(X, label=y, feature_names=self.feaNames)
-        if weight!=None:
-            dtrain.set_weight(weight)
-        cvResult = xgb.cv(
-            self.params, dtrain,
-            num_boost_round = num_boost_round,
-            nfold = nFold,
-            early_stopping_rounds = early_stopping_rounds,
-            verbose_eval=verbose
-        )
-        clf = xgb.train(
-            self.params, dtrain,
-            num_boost_round = cvResult.shape[0],
-        )
-        self.clf = clf
-
-    def gridSearch(self, X, y, nFold=3, verbose=1, num_boost_round=90):
-        paramsGrids = {
-            # 'n_estimators': [50+5*i for i in range(0,30)],
-            # 'gamma': [0,0.05,0.1,0.5,1,5,10,20,50,100],
-            'max_depth': list(range(3,8)),
-            'min_child_weight': list(range(0,10)),
-            'subsample': [1-0.05*i for i in range(0,6)],
-            # 'colsample_bytree': [1-0.05*i for i in range(0,6)],
-            # 'reg_alpha': [0+2*i for i in range(0,10)],
-            'reg_lambda': [0,5,10,15,20,30,50,70,100,150,200,250,300,400,500],
-            'scale_pos_weight': [1+0.2*i for i in range(10)],
-            # 'max_delta_step': [0+1*i for i in range(0,8)],
-        }
-        for k,v in paramsGrids.items():
-            gsearch = GridSearchCV(
-                estimator = xgb.XGBClassifier(
-                    max_depth = self.params['max_depth'],
-                    gamma = self.params['gamma'],
-                    learning_rate = self.params['eta'],
-                    # max_delta_step = self.params['max_delta_step'],
-                    min_child_weight = self.params['min_child_weight'],
-                    subsample = self.params['subsample'],
-                    colsample_bytree = self.params['colsample_bytree'],
-                    # scale_pos_weight = self.params['scale_pos_weight'],
-                    silent = self.params['silent'],
-                    reg_lambda = self.params['lambda'],
-                    n_estimators = num_boost_round,
-                ),
-                # param_grid = paramsGrids,
-                param_grid = {k:v},
-                scoring = 'neg_mean_squared_error',
-                cv = nFold,
-                verbose = verbose,
-                n_jobs = 8
-            )
-            gsearch.fit(X, y)
-            print(pd.DataFrame(gsearch.cv_results_))
-            print(gsearch.best_params_)
-        exit()
-
-    def predict(self, X):
-        X = X.astype(float)
-        return self.clf.predict(xgb.DMatrix(X, feature_names=self.feaNames))
-
-    def getFeaScore(self, show=False):
-        fscore = self.clf.get_score()
-        feaNames = fscore.keys()
-        scoreDf = pd.DataFrame(index=feaNames, columns=['importance'])
-        for k,v in fscore.items():
-            scoreDf.loc[k, 'importance'] = v
-        if show:
-            print(scoreDf.sort_index(by=['importance'], ascending=False))
-        return scoreDf
 
 # 获取stacking下一层数据集
 def getOof(clf, trainX, trainY, testX, nFold=5, stratify=False):
@@ -713,37 +594,31 @@ def score2(labelList, predList):
 def main():
     # 数据导入
     startTime = datetime.now()
-    # userDf = importDf('../data/jdata_user_basic_info.csv')
-    # skuDf = importDf('../data/jdata_sku_basic_info.csv')
-    # actionDf = importDf('../data/jdata_user_action.csv')
-    # orderDf = importDf('../data/jdata_user_order.csv')
-    # commDf = importDf('../data/jdata_user_comment_score.csv')
-    # # userList = userDf.sample(frac=0.1, random_state=0)['user_id'].values
-    # # dfs = {
-    # #     'user_df': userDf[userDf.user_id.isin(userList)],
-    # #     'sku_df': skuDf,
-    # #     'action_df': actionDf[actionDf.user_id.isin(userList)],
-    # #     'order_df': orderDf[orderDf.user_id.isin(userList)],
-    # #     'comm_df': commDf[commDf.user_id.isin(userList)]
-    # #     }
+    userDf = importDf('./data/jdata_user_basic_info.csv')
+    skuDf = importDf('./data/jdata_sku_basic_info.csv')
+    actionDf = importDf('./data/jdata_user_action.csv')
+    orderDf = importDf('./data/jdata_user_order.csv')
+    commDf = importDf('./data/jdata_user_comment_score.csv')
+    # userList = userDf.sample(frac=0.1, random_state=0)['user_id'].values
     # dfs = {
-    #     'user_df': userDf,
+    #     'user_df': userDf[userDf.user_id.isin(userList)],
     #     'sku_df': skuDf,
-    #     'action_df': actionDf,
-    #     'order_df': orderDf,
-    #     'comm_df': commDf
+    #     'action_df': actionDf[actionDf.user_id.isin(userList)],
+    #     'order_df': orderDf[orderDf.user_id.isin(userList)],
+    #     'comm_df': commDf[commDf.user_id.isin(userList)]
     #     }
-    df = importDf('../feaFactory.csv')
-    # df = importDf('../feaFactory_sample.csv')
-    # df = df.sample(frac=0.2)
-    df['date_range'] = pd.to_datetime(df['date_range'])
-    predictDf = importDf('../keng/jdata_a_6_18_1.csv')   # 采用固定的S1
+    dfs = {
+        'user_df': userDf,
+        'sku_df': skuDf,
+        'action_df': actionDf,
+        'order_df': orderDf,
+        'comm_df': commDf
+        }
     print('import dataset:', datetime.now() - startTime)
 
     # 特征工程
-    # feaFactory = FeaFactory(dfs)
-    # df = feaFactory.getFeaDf(startDate='2016-08-01', endDate='2017-05-01', freq=1)
-    df = df[df.date_range.isin(getDateList(startDate='2016-08-01', endDate='2017-05-01', freq=15))]
+    feaFactory = FeaFactory(dfs)
+    df = feaFactory.getFeaDf(startDate='2016-08-01', endDate='2017-05-01', freq=1)
     print('train user num:', df.date_range.value_counts())
     print('train day label:', df.day_label.value_counts())
 
@@ -751,9 +626,12 @@ def main():
         'age','sex','user_lv_cd','user_his_days',
         'date1111_daydelta','date618_daydelta',
         ]
-    cateList = [101,30,71,46,83,1]
+    cateList = list(set(skuDf.cate))
     fea.extend(['user_cate%s_perday_view'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_perday_follow'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_perday_viewday'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_perday_followday'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_perday_sku'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_perday_order'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_perday_orderday'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_perday_order_daymean'%x for x in [101,30,'all','task','other']])
@@ -765,7 +643,10 @@ def main():
     fea.extend(['user_cate%s_perday_order_daydelta_mean'%x for x in [101,30]])
     fea.extend(['cate%s_next_order_pred_by_perday'%x for x in [101,30]])
     fea.extend(['user_cate%s_last15day_view'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last15day_follow'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last15day_viewday'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last15day_followday'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last15day_sku'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last15day_order'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last15day_orderday'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last15day_order_daymean'%x for x in [101,30,'all','task','other']])
@@ -777,7 +658,10 @@ def main():
     fea.extend(['user_cate%s_last15day_order_daydelta_mean'%x for x in [101,30]])
     fea.extend(['cate%s_next_order_pred_by_last15day'%x for x in [101,30]])
     fea.extend(['user_cate%s_last30day_view'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last30day_follow'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last30day_viewday'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last30day_followday'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last30day_sku'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last30day_order'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last30day_orderday'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last30day_order_daymean'%x for x in [101,30,'all','task','other']])
@@ -789,7 +673,10 @@ def main():
     fea.extend(['user_cate%s_last30day_order_daydelta_mean'%x for x in [101,30]])
     fea.extend(['cate%s_next_order_pred_by_last30day'%x for x in [101,30]])
     fea.extend(['user_cate%s_last90day_view'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last90day_follow'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last90day_viewday'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last90day_followday'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_last90day_sku'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last90day_order'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last90day_orderday'%x for x in [101,30,'all','task','other']])
     fea.extend(['user_cate%s_last90day_order_daymean'%x for x in [101,30,'all','task','other']])
@@ -802,103 +689,22 @@ def main():
     fea.extend(['cate%s_next_order_pred_by_last90day'%x for x in [101,30]])
 
     fea.extend(['user_cate%s_last_view_timedelta'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_last_follow_timedelta'%x for x in cateList+['all']])
     fea.extend(['user_cate%s_last_order_timedelta'%x for x in cateList+['all']])
     fea.extend(['user_cate%s_last_order_view_timedelta'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_last_order_follow_timedelta'%x for x in cateList+['all']])
 
+    # fea.extend(['user_cate%s_endday1_view'%x for x in [101,30,'all','task','other']])
+    # fea.extend(['user_cate%s_endday1_follow'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_endday1_order'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_endday3_view'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_endday3_follow'%x for x in cateList+['all']])
+    # fea.extend(['user_cate%s_endday3_order'%x for x in cateList+['all']])
     print(df[fea].info(max_cols=500))
     # fea2 = fea + ['day_predict1']
-    # exit()
 
-    # 模型构建
-    dateParams = {
-        'objective': 'reg:linear',
-        'eval_metric': 'rmse',
-        }
-    dateModel = XgbModel(feaNames=fea, params=dateParams)
-    # dateModel2 = XgbModel(feaNames=fea2, params=dateParams)
-    feaScoreDf = pd.DataFrame(index=fea)
-    costDf = pd.DataFrame(index=['auc','score1','rmse','score2','score'])
-    # for dt in pd.to_datetime(np.unique(df.date_range.values)[-3:-1]):
-    # # for dt in pd.date_range(end='2017-05-01', periods=3, freq='20D')[:-1]:
-    #     # trainDf = df[(df.date_range<dt)&(df.date_range>=dt-timedelta(days=31))]
-    #     trainDf = df[(df.date_range<dt)]
-    #     testDf = df[df.date_range==dt]
-    #     trainDf = trainDf[trainDf.day_label.notnull()]
-    #     testDf = testDf[testDf.day_label.notnull()]
-    #     print('train num:', len(trainDf))
-    #
-    #     # dateModel.gridSearch(trainDf[fea].values, trainDf['day_label'].values)
-    #     dateModel.trainCV(trainDf[fea].values, trainDf['day_label'].values)
-    #     testDf.loc[:,'day_predict'] = dateModel.predict(testDf[fea].values)
-    #     scoreDf = dateModel.getFeaScore()
-    #     # trainDf.loc[:,'day_predict1'],testDf.loc[:,'day_predict1'] = getOof(dateModel, trainDf[fea].values, trainDf['day_label'].values, testDf[fea].values, stratify=True)
-    #     # dateModel2.trainCV(trainDf[fea2].values, trainDf['day_label'].values)
-    #     # testDf.loc[:,'day_predict'] = dateModel2.predict(testDf[fea2].values)
-    #     # scoreDf = dateModel2.getFeaScore()
-    #     # scoreDf.columns = [dt]
-    #     scoreDf.columns = [dt.strftime('%Y-%m-%d')]
-    #     feaScoreDf = feaScoreDf.merge(scoreDf, how='left', left_index=True, right_index=True)
-    #     rmse = metrics.mean_squared_error(testDf['day_label'].values, testDf['day_predict'].values)
-    #     costDf.loc['rmse',dt.strftime('%Y-%m-%d')] = rmse
-    #     print(testDf[(testDf.day_predict<0)|(testDf.day_predict>30)][['user_id','day_predict','day_label']])
-    #     costDf.loc['score2',dt.strftime('%Y-%m-%d')] = score2(testDf['day_label'].values, testDf['day_predict'].values)
-    #     # costDf.loc['oof_cost',dt.strftime('%Y-%m-%d')] = metrics.log_loss(testDf['is_trade'].values, testDf['oof_predict'].values)
-    #     # exportResult(testDf[['user_id','day_label','day_predict']+fea], 'datetest_%s.csv'%dt.strftime('%Y-%m-%d'))
-    # print(feaScoreDf.iloc[:60], feaScoreDf.iloc[60:120], feaScoreDf.iloc[120:180], feaScoreDf.iloc[180:])
-    # print(costDf)
-    # exit()
-
-    # 正式模型
-    modelName = 'dateModel1_15'
-    trainDf = df[df.date_range<date(2017,5,1)]
-    trainDf = trainDf[trainDf.day_label.notnull()]
-    print(len(trainDf))
-    testDf = df[df.date_range==date(2017,5,1)]
-    # buyModel.trainCV(trainDf[fea].values, trainDf['buy_label'].values)
-    # buyModel.getFeaScore(show=True)
-    # testDf.loc[:,'buy_predict'] = buyModel.predict(testDf[fea].values)
-    dateModel.trainCV(trainDf[fea].values, trainDf['day_label'].values)
-    dateModel.getFeaScore(show=True)
-    testDf.loc[:,'day_predict'] = dateModel.predict(testDf[fea].values)
-
-    testDf.set_index('user_id', inplace=True)
-    testDf.loc[:,'day_predict'] = round(testDf['day_predict'])
-    testDf.loc[testDf.day_predict<0,'day_predict'] = 0
-    print(testDf['day_predict'].value_counts())
-    predictDf['pred_date'] = predictDf['user_id'].map(lambda x: '2017-05-%02d'%(testDf.loc[x,'day_predict']+1))
-    print(predictDf.head(20)[['user_id','pred_date']])
-    print(predictDf['pred_date'].value_counts())
-    # exit()
-
-    # 导出模型
-    exportResult(predictDf[['user_id','pred_date']], '%s.csv'%modelName)
-    # exit()
-
-    feaScoreDf = pd.DataFrame(index=fea)
-    costDf = pd.DataFrame(index=['auc','score1','rmse','score2','score'])
-    for dt in pd.to_datetime(np.unique(df.date_range.values)[-3:-1]):
-    # for dt in pd.date_range(end='2017-05-01', periods=3, freq='20D')[:-1]:
-        # trainDf = df[(df.date_range<dt)&(df.date_range>=dt-timedelta(days=31))]
-        trainDf = df[(df.date_range<dt)]
-        testDf = df[df.date_range==dt]
-        trainDf = trainDf[trainDf.day_label.notnull()]
-        testDf = testDf[testDf.day_label.notnull()]
-        print('train num:', len(trainDf))
-
-        # dateModel.gridSearch(trainDf[fea].values, trainDf['day_label'].values)
-        dateModel.trainCV(trainDf[fea].values, trainDf['day_label'].values, verbose=False)
-        testDf.loc[:,'day_predict'] = dateModel.predict(testDf[fea].values)
-        scoreDf = dateModel.getFeaScore()
-        scoreDf.columns = [dt.strftime('%Y-%m-%d')]
-        feaScoreDf = feaScoreDf.merge(scoreDf, how='left', left_index=True, right_index=True)
-        rmse = metrics.mean_squared_error(testDf['day_label'].values, testDf['day_predict'].values)
-        costDf.loc['rmse',dt.strftime('%Y-%m-%d')] = rmse
-        print(testDf[(testDf.day_predict<0)|(testDf.day_predict>30)][['user_id','day_predict','day_label']])
-        costDf.loc['score2',dt.strftime('%Y-%m-%d')] = score2(testDf['day_label'].values, testDf['day_predict'].values)
-        # costDf.loc['oof_cost',dt.strftime('%Y-%m-%d')] = metrics.log_loss(testDf['is_trade'].values, testDf['oof_predict'].values)
-        # exportResult(testDf[['user_id','day_label','day_predict']+fea], 'datetest_%s.csv'%dt.strftime('%Y-%m-%d'))
-    print(feaScoreDf.iloc[:60], feaScoreDf.iloc[60:120], feaScoreDf.iloc[120:180], feaScoreDf.iloc[180:])
-    print(costDf)
+    # 导出特征
+    exportResult(df[['user_id','date_range','day_label']+fea], 'feaFactory.csv')
 
 if __name__ == '__main__':
     finishTime = datetime.now()
